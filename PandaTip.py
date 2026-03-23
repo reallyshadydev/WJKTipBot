@@ -20,7 +20,6 @@ logging.basicConfig(
 import time
 import threading
 import requests
-import math
 from datetime import datetime
 
 
@@ -814,6 +813,14 @@ def damp_rock(update, context):
 	_group_id = str(update.effective_chat.id)
 	if update.effective_user.is_bot:
 		return
+	# Slash-commands are not "chat activity" for the rain queue
+	_em = update.effective_message
+	if _em.text and _em.entities:
+		_e0 = _em.entities[0]
+		if getattr(_e0, "offset", None) == 0:
+			_et = _e0.type
+			if _et == "bot_command" or getattr(_et, "name", None) == "BOT_COMMAND":
+				return
 	# Get user_id for the tip command (either @username or else UserID)
 	_username = update.effective_user.username
 	_user_id = str(update.effective_user.id)  # The queue uses real UserID to avoid registering a user twice if user creates @
@@ -853,9 +860,8 @@ def damp_rock(update, context):
 def rain(update, context):
 	"""
 	/rain <total_amount> [max_recipients]
-	Total amount split equally among active members, excluding the sender (each gets at least 1).
-	Same idea as Healdb/Dogecoin-Rain-Bot: tip_amount = total_amount/count, exclude initiator.
-	https://github.com/Healdb/Dogecoin-Rain-Bot/blob/master/Rainbot.py
+	Total WJK is split in whole coins among active members, excluding the sender.
+	Uses an exact integer partition (sum of tips equals total), not rounded-up per-person amounts.
 	"""
 	args = context.args or []
 	_debug_log.debug("rain user=%s group=%s args=%s", update.effective_user.id, getattr(update.effective_chat, "id", None), args)
@@ -873,7 +879,7 @@ def rain(update, context):
 	_user_id = str(update.effective_user.id)
 	if len(args) == 0 or len(args) > 2:
 		update.message.reply_text(
-			"Use `/rain <total_amount> [max_recipients]` — total WJK is split equally among active members (excl. you).",
+			"Use `/rain <total_amount> [max_recipients]` — total WJK is split exactly among active members (excl. you).",
 			quote=True,
 			parse_mode=ParseMode.MARKDOWN
 		)
@@ -960,12 +966,12 @@ def rain(update, context):
 				disable_web_page_preview=True
 			)
 			return
-		# Same as Healdb/Dogecoin-Rain-Bot: tip_amount = total/count, round up so each gets same amount
-		# (total sent may be slightly over stated total)
-		per_person = int(math.ceil(float(_rain_amount_demanded) / n_recipients))
-		_rain_amounts = [per_person] * n_recipients
-		_debug_log.debug("rain total=%s n_recipients=%s per_person=%s recipients=%s", _rain_amount_demanded, n_recipients, per_person, _recipients)
-		log("rain", _user_id, "rain (total %i, %i WJK each over %i members) handed to do_tip()" % (_rain_amount_demanded, per_person, n_recipients))
+		# Exact split: base = total // n, first (total % n) recipients get base+1, rest get base (sum == total)
+		_base = _rain_amount_demanded // n_recipients
+		_rem = _rain_amount_demanded % n_recipients
+		_rain_amounts = [_base + (1 if _i < _rem else 0) for _i in range(n_recipients)]
+		_debug_log.debug("rain total=%s n_recipients=%s amounts=%s recipients=%s", _rain_amount_demanded, n_recipients, _rain_amounts, _recipients)
+		log("rain", _user_id, "rain total %i split across %i members amounts=%s handed to do_tip()" % (_rain_amount_demanded, n_recipients, _rain_amounts))
 		do_tip(update, context, _rain_amounts, _recipients, _handled, verb="rain")
 
 
