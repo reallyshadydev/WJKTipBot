@@ -19,6 +19,7 @@ logging.basicConfig(
 )
 import time
 import threading
+import random
 import requests
 from datetime import datetime
 
@@ -47,6 +48,8 @@ __rain_queue_min_words = 1         # minimum words in a message to count as acti
 __rain_queue_max_members = 30  # Max members in a queue, 30
 __rain_min_members = 1  # minimum active members in queue for /rain
 __rain_min_amount = 1  # minimum WJK per member for /rain
+_rain_busy_ids = set()
+_rain_busy_lock = threading.Lock()
 
 # Block announce (new block -> message to group)
 _last_block_count = -1
@@ -857,14 +860,28 @@ def damp_rock(update, context):
 	_debug_log.debug("damp_rock queue[%s] len=%s", _group_id, len(_rain_queues[_group_id]))
 
 
+def _rain_try_acquire(user_id):
+	with _rain_busy_lock:
+		if user_id in _rain_busy_ids:
+			return False
+		_rain_busy_ids.add(user_id)
+		return True
+
+
+def _rain_release(user_id):
+	with _rain_busy_lock:
+		_rain_busy_ids.discard(user_id)
+
+
 def rain(update, context):
 	"""
 	/rain <total> [times]
-	Split `total` WJK in whole coins among up to `times` recently active members (excl. sender).
-	Integer split: sum of tips equals `total` (first recipients get +1 WJK when remainder).
-	Omit `times` to include everyone eligible (capped at the configured queue limit).
+	/rain random <max_total> [times]
+	Split total WJK in whole coins among up to `times` picked users (excl. sender).
+	Eligible actives are shuffled (IRC-style fair pick), then capped by `times`.
+	`random`: total is randint(min_rain, max_total) inclusive.
 	"""
-	args = context.args or []
+	args = list(context.args or [])
 	_debug_log.debug("rain user=%s group=%s args=%s", update.effective_user.id, getattr(update.effective_chat, "id", None), args)
 	if not _spam_filter.verify(str(update.effective_user.id)):
 		return
@@ -878,49 +895,70 @@ def rain(update, context):
 	#
 	_group_id = str(update.effective_chat.id)
 	_user_id = str(update.effective_user.id)
+	_random_mode = False
+	if len(args) >= 1 and args[0].lower() == "random":
+		_random_mode = True
+		args = args[1:]
 	if len(args) == 0 or len(args) > 2:
 		update.message.reply_text(
-			"Use `/rain <total> [times]` — split `total` WJK among up to `times` *active* members (you are excluded). "
-			"Omit `times` to split among everyone eligible (up to %i)." % __rain_queue_max_members,
+			"Use `/rain <total> [times]` or `/rain random <max_total> [times]` — split *total* WJK among up to `times` "
+			"*active* members (you are excluded); recipients are picked at random from actives. "
+			"`random` rolls a total between `%i` and `max_total` WJK. Omit `times` for everyone eligible (up to %i)." % (
+				__rain_min_amount, __rain_queue_max_members),
 			quote=True,
 			parse_mode=ParseMode.MARKDOWN
 		)
 		return
-	if 0 < len(args) <= 2:  # We may or may not allow text after the first 2 arguments. Probably not.
-		# Check if queue has enough members
-		if _group_id not in _rain_queues:
-			update.message.reply_text(
-				strings.get("rain_queue_not_initialized", _lang),
-				quote=True,
-				parse_mode=ParseMode.MARKDOWN,
-				disable_web_page_preview=True
-			)
-			return
-		# total WJK to split; times = max number of active recipients in the split
-		_rain_total = 0
-		_times = __rain_queue_max_members  # max recipients when [times] omitted
-		try:
-			_rain_total = int(args[0])
-			if len(args) > 1:
-				_times = int(args[1])
-		except ValueError:
-			return  # Don't show error. Probably trolling.
-		if len(args) > 1 and (_times < __rain_min_members or _times > __rain_queue_max_members):
-			update.message.reply_text(
-				strings.get("rain_queue_min_max_members", _lang) % (__rain_min_members, __rain_queue_max_members, _times),
-				quote=True,
-				parse_mode=ParseMode.MARKDOWN,
-				disable_web_page_preview=True
-			)
-			return
-		# Check if user is in queue, don't remove user from original queue as recipients array will be created later
-		# Note that using this command doesn't put the user in queue (commands are excluded from damp_rock())
+	_times = __rain_queue_max_members
+	try:
+		_cap_or_total = int(args[0])
+		if len(args) > 1:
+			_times = int(args[1])
+	except ValueError:
+		return
+	if _random_mode and _cap_or_total < __rain_min_amount:
+		update.message.reply_text(
+			strings.get("rain_random_cap_too_low", _lang) % (__rain_min_amount, _cap_or_total),
+			quote=True,
+			parse_mode=ParseMode.MARKDOWN,
+			disable_web_page_preview=True
+		)
+		return
+	if len(args) > 1 and (_times < __rain_min_members or _times > __rain_queue_max_members):
+		update.message.reply_text(
+			strings.get("rain_queue_min_max_members", _lang) % (__rain_min_members, __rain_queue_max_members, _times),
+			quote=True,
+			parse_mode=ParseMode.MARKDOWN,
+			disable_web_page_preview=True
+		)
+		return
+	if _group_id not in _rain_queues:
+		update.message.reply_text(
+			strings.get("rain_queue_not_initialized", _lang),
+			quote=True,
+			parse_mode=ParseMode.MARKDOWN,
+			disable_web_page_preview=True
+		)
+		return
+	if not _rain_try_acquire(_user_id):
+		update.message.reply_text(
+			strings.get("rain_busy", _lang),
+			quote=True,
+			parse_mode=ParseMode.MARKDOWN,
+			disable_web_page_preview=True
+		)
+		return
+	try:
+		if _random_mode:
+			_rain_total = random.randint(__rain_min_amount, _cap_or_total)
+			_debug_log.debug("rain random rolled total=%s cap=%s", _rain_total, _cap_or_total)
+		else:
+			_rain_total = _cap_or_total
 		_modifier = 0
 		for _user_data in _rain_queues[_group_id]:
 			if _user_data[0] == _user_id:
 				_modifier = -1
 				break
-		# Check if there are enough members in queue (minus user if needed)
 		if len(_rain_queues[_group_id]) + _modifier < __rain_min_members:
 			update.message.reply_text(
 				strings.get("rain_queue_not_enough_members", _lang) % (
@@ -933,15 +971,13 @@ def rain(update, context):
 				disable_web_page_preview=True
 			)
 			return
-		# Build recipients list (up to _times active members, excluding sender)
-		_recipients = []  # Array of LocalUserID
-		_handled = {}  # Dict of LocalUserID: (Readable Name, Unused, Unused)
-		for _user_data in _rain_queues[_group_id]:
-			if _user_data[0] != _user_id:
-				_recipients.append(_user_data[1])
-				_handled[_user_data[1]] = (_user_data[2], None, None)
-				if len(_recipients) >= _times:
-					break
+		_eligible = [_u for _u in _rain_queues[_group_id] if _u[0] != _user_id]
+		random.shuffle(_eligible)
+		_recipients = []
+		_handled = {}
+		for _user_data in _eligible[:_times]:
+			_recipients.append(_user_data[1])
+			_handled[_user_data[1]] = (_user_data[2], None, None)
 		n_recipients = len(_recipients)
 		if n_recipients == 0:
 			update.message.reply_text(
@@ -973,9 +1009,11 @@ def rain(update, context):
 		_base = _rain_total // n_recipients
 		_rem = _rain_total % n_recipients
 		_rain_amounts = [_base + (1 if _i < _rem else 0) for _i in range(n_recipients)]
-		_debug_log.debug("rain total=%s times_cap=%s n_recipients=%s amounts=%s sum=%s recipients=%s", _rain_total, _times, n_recipients, _rain_amounts, sum(_rain_amounts), _recipients)
-		log("rain", _user_id, "rain split total %i across %i members amounts=%s handed to do_tip()" % (_rain_total, n_recipients, _rain_amounts))
+		_debug_log.debug("rain total=%s random=%s times_cap=%s n_recipients=%s amounts=%s sum=%s recipients=%s", _rain_total, _random_mode, _times, n_recipients, _rain_amounts, sum(_rain_amounts), _recipients)
+		log("rain", _user_id, "rain split total %i across %i members (shuffle) amounts=%s random=%s handed to do_tip()" % (_rain_total, n_recipients, _rain_amounts, _random_mode))
 		do_tip(update, context, _rain_amounts, _recipients, _handled, verb="rain")
+	finally:
+		_rain_release(_user_id)
 
 
 def do_tip(update, context, amounts_float, recipients, handled, verb="tip"):

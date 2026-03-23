@@ -29,7 +29,7 @@
 			"`/tip` — Tip tagged users; use mentions and amounts (same amount for everyone or one amount per user).",
 			"",
 			":cloud_with_rain: *Rain (groups / supergroups only)*",
-			"`/rain <total> [times]` — Split `total` WJK *exactly* among up to `times` *recently active* members (you are excluded). All recipients are paid in *one* on-chain transaction per `/rain`. Example: `50` over `50` people → 1 WJK each. Omit `times` to use everyone eligible (up to 30).",
+			"`/rain <total> [times]` — Split `total` WJK *exactly* among up to `times` *active* members (you excluded); actives are *shuffled* then picked (like IRC rain). One on-chain tx per `/rain`. `/rain random <max_total> [times]` picks a random total between the per-person minimum and `max_total`, then splits it the same way.",
 			"`/checkactive` — Show how many users are in the rain activity queue.",
 			"",
 			":wrench: *Admin (configured bot admins only)*",
@@ -206,6 +206,18 @@
 	"clear_log_done": {
 		"en": [
 			":white_check_mark: Cleared!"
+		]
+	},
+
+	"rain_busy": {
+		"en": [
+			"You already have a rain in progress. Wait until it finishes."
+		]
+	},
+
+	"rain_random_cap_too_low": {
+		"en": [
+			"`max_total` must be at least `%i` WJK for `random` rain (you sent `%i`)."
 		]
 	},
 
