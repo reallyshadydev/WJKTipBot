@@ -19,8 +19,8 @@ logging.basicConfig(
 )
 import time
 import threading
+import random
 import requests
-import math
 from datetime import datetime
 
 
@@ -48,6 +48,8 @@ __rain_queue_min_words = 1         # minimum words in a message to count as acti
 __rain_queue_max_members = 30  # Max members in a queue, 30
 __rain_min_members = 1  # minimum active members in queue for /rain
 __rain_min_amount = 1  # minimum WJK per member for /rain
+_rain_busy_ids = set()
+_rain_busy_lock = threading.Lock()
 
 # Block announce (new block -> message to group)
 _last_block_count = -1
@@ -814,6 +816,14 @@ def damp_rock(update, context):
 	_group_id = str(update.effective_chat.id)
 	if update.effective_user.is_bot:
 		return
+	# Slash-commands are not "chat activity" for the rain queue
+	_em = update.effective_message
+	if _em.text and _em.entities:
+		_e0 = _em.entities[0]
+		if getattr(_e0, "offset", None) == 0:
+			_et = _e0.type
+			if _et == "bot_command" or getattr(_et, "name", None) == "BOT_COMMAND":
+				return
 	# Get user_id for the tip command (either @username or else UserID)
 	_username = update.effective_user.username
 	_user_id = str(update.effective_user.id)  # The queue uses real UserID to avoid registering a user twice if user creates @
@@ -850,14 +860,28 @@ def damp_rock(update, context):
 	_debug_log.debug("damp_rock queue[%s] len=%s", _group_id, len(_rain_queues[_group_id]))
 
 
+def _rain_try_acquire(user_id):
+	with _rain_busy_lock:
+		if user_id in _rain_busy_ids:
+			return False
+		_rain_busy_ids.add(user_id)
+		return True
+
+
+def _rain_release(user_id):
+	with _rain_busy_lock:
+		_rain_busy_ids.discard(user_id)
+
+
 def rain(update, context):
 	"""
-	/rain <total_amount> [max_recipients]
-	Total amount split equally among active members, excluding the sender (each gets at least 1).
-	Same idea as Healdb/Dogecoin-Rain-Bot: tip_amount = total_amount/count, exclude initiator.
-	https://github.com/Healdb/Dogecoin-Rain-Bot/blob/master/Rainbot.py
+	/rain <total> [times]
+	/rain random <max_total> [times]
+	Split total WJK in whole coins among up to `times` picked users (excl. sender).
+	Eligible actives are shuffled (IRC-style fair pick), then capped by `times`.
+	`random`: total is randint(min_rain, max_total) inclusive.
 	"""
-	args = context.args or []
+	args = list(context.args or [])
 	_debug_log.debug("rain user=%s group=%s args=%s", update.effective_user.id, getattr(update.effective_chat, "id", None), args)
 	if not _spam_filter.verify(str(update.effective_user.id)):
 		return
@@ -871,48 +895,70 @@ def rain(update, context):
 	#
 	_group_id = str(update.effective_chat.id)
 	_user_id = str(update.effective_user.id)
+	_random_mode = False
+	if len(args) >= 1 and args[0].lower() == "random":
+		_random_mode = True
+		args = args[1:]
 	if len(args) == 0 or len(args) > 2:
 		update.message.reply_text(
-			"Use `/rain <total_amount> [max_recipients]` — total WJK is split equally among active members (excl. you).",
+			"Use `/rain <total> [times]` or `/rain random <max_total> [times]` — split *total* WJK among up to `times` "
+			"*active* members (you are excluded); recipients are picked at random from actives. "
+			"`random` rolls a total between `%i` and `max_total` WJK. Omit `times` for everyone eligible (up to %i)." % (
+				__rain_min_amount, __rain_queue_max_members),
 			quote=True,
 			parse_mode=ParseMode.MARKDOWN
 		)
 		return
-	if 0 < len(args) <= 2:  # We may or may not allow text after the first 2 arguments. Probably not.
-		# Check if queue has enough members
-		if _group_id not in _rain_queues:
-			update.message.reply_text(
-				strings.get("rain_queue_not_initialized", _lang),
-				quote=True,
-				parse_mode=ParseMode.MARKDOWN,
-				disable_web_page_preview=True
-			)
-			return
-		# Prepare arguments
-		_rain_amount_demanded = 0
-		_rain_members_demanded = __rain_queue_max_members  # number of members = min(optional args[1], queue_max, queue_len)
-		try:
-			_rain_amount_demanded = int(args[0])
-			if len(args) > 1:
-				_rain_members_demanded = int(args[1])
-		except ValueError:
-			return  # Don't show error. Probably trolling.
-		if _rain_members_demanded < __rain_min_members or _rain_members_demanded > __rain_queue_max_members:
-			update.message.reply_text(
-				strings.get("rain_queue_min_max_members", _lang) % (__rain_min_members, __rain_queue_max_members, _rain_members_demanded),
-				quote=True,
-				parse_mode=ParseMode.MARKDOWN,
-				disable_web_page_preview=True
-			)
-			return
-		# Check if user is in queue, don't remove user from original queue as recipients array will be created later
-		# Note that using this command doesn't put the user in queue (commands are excluded from damp_rock())
+	_times = __rain_queue_max_members
+	try:
+		_cap_or_total = int(args[0])
+		if len(args) > 1:
+			_times = int(args[1])
+	except ValueError:
+		return
+	if _random_mode and _cap_or_total < __rain_min_amount:
+		update.message.reply_text(
+			strings.get("rain_random_cap_too_low", _lang) % (__rain_min_amount, _cap_or_total),
+			quote=True,
+			parse_mode=ParseMode.MARKDOWN,
+			disable_web_page_preview=True
+		)
+		return
+	if len(args) > 1 and (_times < __rain_min_members or _times > __rain_queue_max_members):
+		update.message.reply_text(
+			strings.get("rain_queue_min_max_members", _lang) % (__rain_min_members, __rain_queue_max_members, _times),
+			quote=True,
+			parse_mode=ParseMode.MARKDOWN,
+			disable_web_page_preview=True
+		)
+		return
+	if _group_id not in _rain_queues:
+		update.message.reply_text(
+			strings.get("rain_queue_not_initialized", _lang),
+			quote=True,
+			parse_mode=ParseMode.MARKDOWN,
+			disable_web_page_preview=True
+		)
+		return
+	if not _rain_try_acquire(_user_id):
+		update.message.reply_text(
+			strings.get("rain_busy", _lang),
+			quote=True,
+			parse_mode=ParseMode.MARKDOWN,
+			disable_web_page_preview=True
+		)
+		return
+	try:
+		if _random_mode:
+			_rain_total = random.randint(__rain_min_amount, _cap_or_total)
+			_debug_log.debug("rain random rolled total=%s cap=%s", _rain_total, _cap_or_total)
+		else:
+			_rain_total = _cap_or_total
 		_modifier = 0
 		for _user_data in _rain_queues[_group_id]:
 			if _user_data[0] == _user_id:
 				_modifier = -1
 				break
-		# Check if there are enough members in queue (minus user if needed)
 		if len(_rain_queues[_group_id]) + _modifier < __rain_min_members:
 			update.message.reply_text(
 				strings.get("rain_queue_not_enough_members", _lang) % (
@@ -925,15 +971,13 @@ def rain(update, context):
 				disable_web_page_preview=True
 			)
 			return
-		# Build recipients list (up to _rain_members_demanded, excluding sender)
-		_recipients = []  # Array of LocalUserID
-		_handled = {}  # Dict of LocalUserID: (Readable Name, Unused, Unused)
-		for _user_data in _rain_queues[_group_id]:
-			if _user_data[0] != _user_id:
-				_recipients.append(_user_data[1])
-				_handled[_user_data[1]] = (_user_data[2], None, None)
-				if len(_recipients) >= _rain_members_demanded:
-					break
+		_eligible = [_u for _u in _rain_queues[_group_id] if _u[0] != _user_id]
+		random.shuffle(_eligible)
+		_recipients = []
+		_handled = {}
+		for _user_data in _eligible[:_times]:
+			_recipients.append(_user_data[1])
+			_handled[_user_data[1]] = (_user_data[2], None, None)
 		n_recipients = len(_recipients)
 		if n_recipients == 0:
 			update.message.reply_text(
@@ -943,30 +987,33 @@ def rain(update, context):
 				disable_web_page_preview=True
 			)
 			return
-		# Rain = total amount split equally among recipients (each gets at least 1)
-		if _rain_amount_demanded < __rain_min_amount * n_recipients:
+		if _rain_total < n_recipients:
 			update.message.reply_text(
-				strings.get("rain_queue_min_amount", _lang) % (__rain_min_amount, "WJK", _rain_amount_demanded, "WJK"),
+				strings.get("rain_queue_min_total", _lang) % (_rain_total, n_recipients),
 				quote=True,
 				parse_mode=ParseMode.MARKDOWN,
 				disable_web_page_preview=True
 			)
 			return
-		if _rain_amount_demanded < n_recipients:
+		if _rain_total < __rain_min_amount * n_recipients:
+			_min_need = __rain_min_amount * n_recipients
 			update.message.reply_text(
-				strings.get("rain_queue_min_total", _lang) % (n_recipients, n_recipients),
+				strings.get("rain_queue_min_amount", _lang) % (
+					_rain_total, "WJK", n_recipients, __rain_min_amount, "WJK", _min_need, "WJK"
+				),
 				quote=True,
 				parse_mode=ParseMode.MARKDOWN,
 				disable_web_page_preview=True
 			)
 			return
-		# Same as Healdb/Dogecoin-Rain-Bot: tip_amount = total/count, round up so each gets same amount
-		# (total sent may be slightly over stated total)
-		per_person = int(math.ceil(float(_rain_amount_demanded) / n_recipients))
-		_rain_amounts = [per_person] * n_recipients
-		_debug_log.debug("rain total=%s n_recipients=%s per_person=%s recipients=%s", _rain_amount_demanded, n_recipients, per_person, _recipients)
-		log("rain", _user_id, "rain (total %i, %i WJK each over %i members) handed to do_tip()" % (_rain_amount_demanded, per_person, n_recipients))
+		_base = _rain_total // n_recipients
+		_rem = _rain_total % n_recipients
+		_rain_amounts = [_base + (1 if _i < _rem else 0) for _i in range(n_recipients)]
+		_debug_log.debug("rain total=%s random=%s times_cap=%s n_recipients=%s amounts=%s sum=%s recipients=%s", _rain_total, _random_mode, _times, n_recipients, _rain_amounts, sum(_rain_amounts), _recipients)
+		log("rain", _user_id, "rain split total %i across %i members (shuffle) amounts=%s random=%s handed to do_tip()" % (_rain_total, n_recipients, _rain_amounts, _random_mode))
 		do_tip(update, context, _rain_amounts, _recipients, _handled, verb="rain")
+	finally:
+		_rain_release(_user_id)
 
 
 def do_tip(update, context, amounts_float, recipients, handled, verb="tip"):
@@ -986,7 +1033,8 @@ def do_tip(update, context, amounts_float, recipients, handled, verb="tip"):
 	if verb not in ["tip", "rain"]:
 		log("do_tip", "__system__", "Incorrect verb passed to do_tip()")
 		verb = "tip"
-	# Check if only 1 amount is given
+	# One amount + several recipients => same tip to each (/tip). Rain passes one amount per
+	# recipient (exact split); each raw tx below uses that row's value in send_dict.
 	_amounts_float = amounts_float
 	if len(_amounts_float) == 1 and len(recipients) > 1:
 		_amounts_float = _amounts_float * len(recipients)
@@ -1022,10 +1070,14 @@ def do_tip(update, context, amounts_float, recipients, handled, verb="tip"):
 		else:
 			_balance = int(_rpc_call["result"]["result"])
 			_debug_log.debug("do_tip balance=%s sum(amounts)=%s recipients_count=%s", _balance, sum(_amounts_float), len(recipients))
-			# Now, finally, check if user has enough funds (includes tx fee)
-			if sum(_amounts_float) > _balance - max(1, int(len(recipients)/3)):
+			# Fee cushion: one tx for rain; legacy per-recipient txs for tip
+			if verb == "rain":
+				_fee_buf = 1
+			else:
+				_fee_buf = max(1, int(len(recipients) / 3))
+			if sum(_amounts_float) > _balance - _fee_buf:
 				update.message.reply_text(
-					text="%s `%i WJK`" % (strings.get("tip_no_funds", _lang), sum(_amounts_float) + max(1, int(len(recipients)/3))),
+					text="%s `%i WJK`" % (strings.get("tip_no_funds", _lang), sum(_amounts_float) + _fee_buf),
 					quote=True,
 					parse_mode=ParseMode.MARKDOWN
 				)
@@ -1081,97 +1133,138 @@ def do_tip(update, context, amounts_float, recipients, handled, verb="tip"):
 						# WojakCoin sendmany expects addresses as keys
 						send_dict[_address] = _amounts_float[i]
 					i += 1
-				# After building send_dict: one tx per recipient (do not send inside the loop above)
+				# After building send_dict: rain = one multi-output tx; tip = one tx per recipient
 				_debug_log.debug("do_tip send_dict=%s _tip_dict=%s", send_dict, _tip_dict)
 				if len(_tip_dict) == 0:
 					return
 				fee = 0.0001  # fixed fee, matches wallet paytxfee
 				txids = []
-				for _address, _amount in send_dict.items():
-					# 1) Select UTXOs from the sender's address (minconf=0, spend unconfirmed)
+
+				def _broadcast_raw_tx(inputs, outputs, log_ctx):
+					_rpc_call = __wallet_rpc.createrawtransaction(inputs, outputs)
+					if not _rpc_call["success"]:
+						print("Error during RPC call.")
+						log("do_tip", _user_id, "%s createrawtransaction > Error during RPC call: %s" % (log_ctx, _rpc_call["message"]))
+						return None
+					if _rpc_call["result"]["error"] is not None:
+						print("Error: %s" % _rpc_call["result"]["error"])
+						log("do_tip", _user_id, "%s createrawtransaction > Error: %s" % (log_ctx, _rpc_call["result"]["error"]))
+						return None
+					rawtx = _rpc_call["result"]["result"]
+					_rpc_call = __wallet_rpc.signrawtransaction(rawtx)
+					if not _rpc_call["success"]:
+						print("Error during RPC call.")
+						log("do_tip", _user_id, "%s signrawtransaction > Error during RPC call: %s" % (log_ctx, _rpc_call["message"]))
+						return None
+					if _rpc_call["result"]["error"] is not None:
+						print("Error: %s" % _rpc_call["result"]["error"])
+						log("do_tip", _user_id, "%s signrawtransaction > Error: %s" % (log_ctx, _rpc_call["result"]["error"]))
+						return None
+					_sign_res = _rpc_call["result"]["result"]
+					if not _sign_res.get("complete", False):
+						log("do_tip", _user_id, "%s signrawtransaction > Incomplete signature" % log_ctx)
+						return None
+					signed_hex = _sign_res["hex"]
+					_rpc_call = __wallet_rpc.sendrawtransaction(signed_hex)
+					if not _rpc_call["success"]:
+						print("Error during RPC call.")
+						log("do_tip", _user_id, "%s sendrawtransaction > Error during RPC call: %s" % (log_ctx, _rpc_call["message"]))
+						return None
+					if _rpc_call["result"]["error"] is not None:
+						print("Error: %s" % _rpc_call["result"]["error"])
+						log("do_tip", _user_id, "%s sendrawtransaction > Error: %s" % (log_ctx, _rpc_call["result"]["error"]))
+						return None
+					return _rpc_call["result"]["result"]
+
+				if verb == "rain":
+					# One transaction with all recipient outputs (plus change)
+					_outputs_agg = {}
+					for _addr, _amt in send_dict.items():
+						_outputs_agg[_addr] = _outputs_agg.get(_addr, 0.0) + float(_amt)
+					total_out = sum(_outputs_agg.values())
+					needed = total_out + fee
 					_rpc_call = __wallet_rpc.listunspent(0, 9999999, [_from_address])
 					if not _rpc_call["success"]:
 						print("Error during RPC call.")
-						log("do_tip", _user_id, "(4) listunspent(%s) > Error during RPC call: %s" % (_from_address, _rpc_call["message"]))
+						log("do_tip", _user_id, "(rain) listunspent(%s) > Error during RPC call: %s" % (_from_address, _rpc_call["message"]))
 						return
-					elif _rpc_call["result"]["error"] is not None:
+					if _rpc_call["result"]["error"] is not None:
 						print("Error: %s" % _rpc_call["result"]["error"])
-						log("do_tip", _user_id, "(4) listunspent(%s) > Error: %s" % (_from_address, _rpc_call["result"]["error"]))
+						log("do_tip", _user_id, "(rain) listunspent(%s) > Error: %s" % (_from_address, _rpc_call["result"]["error"]))
 						return
-
 					_utxos = _rpc_call["result"]["result"]
 					inputs = []
 					total_in = 0.0
 					for utxo in _utxos:
-						inputs.append({
-							"txid": utxo["txid"],
-							"vout": utxo["vout"],
-						})
+						inputs.append({"txid": utxo["txid"], "vout": utxo["vout"]})
 						total_in += float(utxo["amount"])
-						if total_in >= _amount + fee:
+						if total_in >= needed:
 							break
-
-					if total_in < _amount + fee:
+					if total_in < needed:
 						update.message.reply_text(
-							text="%s `%i WJK`" % (strings.get("tip_no_funds", _lang), _amount),
+							text="%s `%i WJK`" % (strings.get("tip_no_funds", _lang), int(total_out) + 1),
 							quote=True,
 							parse_mode=ParseMode.MARKDOWN
 						)
-						log("do_tip", _user_id, "(4) listunspent > Not enough UTXOs for raw tip")
+						log("do_tip", _user_id, "(rain) listunspent > Not enough UTXOs for batched rain")
 						return
-
-					change = total_in - _amount - fee
-					outputs = {
-						_address: float(_amount)
-					}
-					# Only create a change output if change is positive and non-dust
+					change = total_in - total_out - fee
+					outputs = dict(_outputs_agg)
 					if change > 0:
-						outputs[_from_address] = round(change, 8)
-
-					# 2) Create raw transaction
-					_rpc_call = __wallet_rpc.createrawtransaction(inputs, outputs)
-					if not _rpc_call["success"]:
-						print("Error during RPC call.")
-						log("do_tip", _user_id, "(4) createrawtransaction > Error during RPC call: %s" % _rpc_call["message"])
+						if _from_address in outputs:
+							outputs[_from_address] = round(outputs[_from_address] + change, 8)
+						else:
+							outputs[_from_address] = round(change, 8)
+					_txid = _broadcast_raw_tx(inputs, outputs, "(rain batch)")
+					if _txid is None:
 						return
-					elif _rpc_call["result"]["error"] is not None:
-						print("Error: %s" % _rpc_call["result"]["error"])
-						log("do_tip", _user_id, "(4) createrawtransaction > Error: %s" % _rpc_call["result"]["error"])
-						return
+					txids.append(_txid)
+					_debug_log.debug("do_tip rain batch tx %s outputs=%s total_out=%s", _txid[:12], len(outputs), total_out)
+				else:
+					for _address, _amount in send_dict.items():
+						_rpc_call = __wallet_rpc.listunspent(0, 9999999, [_from_address])
+						if not _rpc_call["success"]:
+							print("Error during RPC call.")
+							log("do_tip", _user_id, "(4) listunspent(%s) > Error during RPC call: %s" % (_from_address, _rpc_call["message"]))
+							return
+						elif _rpc_call["result"]["error"] is not None:
+							print("Error: %s" % _rpc_call["result"]["error"])
+							log("do_tip", _user_id, "(4) listunspent(%s) > Error: %s" % (_from_address, _rpc_call["result"]["error"]))
+							return
 
-					rawtx = _rpc_call["result"]["result"]
+						_utxos = _rpc_call["result"]["result"]
+						inputs = []
+						total_in = 0.0
+						for utxo in _utxos:
+							inputs.append({
+								"txid": utxo["txid"],
+								"vout": utxo["vout"],
+							})
+							total_in += float(utxo["amount"])
+							if total_in >= _amount + fee:
+								break
 
-					# 3) Sign raw transaction
-					_rpc_call = __wallet_rpc.signrawtransaction(rawtx)
-					if not _rpc_call["success"]:
-						print("Error during RPC call.")
-						log("do_tip", _user_id, "(4) signrawtransaction > Error during RPC call: %s" % _rpc_call["message"])
-						return
-					elif _rpc_call["result"]["error"] is not None:
-						print("Error: %s" % _rpc_call["result"]["error"])
-						log("do_tip", _user_id, "(4) signrawtransaction > Error: %s" % _rpc_call["result"]["error"])
-						return
+						if total_in < _amount + fee:
+							update.message.reply_text(
+								text="%s `%i WJK`" % (strings.get("tip_no_funds", _lang), _amount),
+								quote=True,
+								parse_mode=ParseMode.MARKDOWN
+							)
+							log("do_tip", _user_id, "(4) listunspent > Not enough UTXOs for raw tip")
+							return
 
-					_sign_res = _rpc_call["result"]["result"]
-					if not _sign_res.get("complete", False):
-						log("do_tip", _user_id, "(4) signrawtransaction > Incomplete signature")
-						return
+						change = total_in - _amount - fee
+						outputs = {
+							_address: float(_amount)
+						}
+						if change > 0:
+							outputs[_from_address] = round(change, 8)
 
-					signed_hex = _sign_res["hex"]
-
-					# 4) Broadcast raw transaction
-					_rpc_call = __wallet_rpc.sendrawtransaction(signed_hex)
-					if not _rpc_call["success"]:
-						print("Error during RPC call.")
-						log("do_tip", _user_id, "(4) sendrawtransaction > Error during RPC call: %s" % _rpc_call["message"])
-						return
-					elif _rpc_call["result"]["error"] is not None:
-						print("Error: %s" % _rpc_call["result"]["error"])
-						log("do_tip", _user_id, "(4) sendrawtransaction > Error: %s" % _rpc_call["result"]["error"])
-						return
-
-					txids.append(_rpc_call["result"]["result"])
-					_debug_log.debug("do_tip sent tx %s -> %s amount=%s", _rpc_call["result"]["result"][:12], _address[:12], _amount)
+						_txid = _broadcast_raw_tx(inputs, outputs, "(tip)")
+						if _txid is None:
+							return
+						txids.append(_txid)
+						_debug_log.debug("do_tip sent tx %s -> %s amount=%s", _txid[:12], _address[:12], _amount)
 
 				_suppl = ""
 				if len(_tip_dict) != len(recipients):
