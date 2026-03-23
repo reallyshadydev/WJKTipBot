@@ -2,13 +2,16 @@
 
 import requests
 import json
+import logging
 from functools import partial
 from HelperFunctions import load_file_json
 import sys, traceback
 import urllib3; urllib3.disable_warnings()
 
+_rpc_log = logging.getLogger("PandaRPC")
 
-class MethodMissing:
+
+class MethodMissing(object):
 	def method_missing(self, name, *args, **kwargs):
 		print("Command %s with args %s and additional args %s" % (name, args, kwargs))
 
@@ -16,7 +19,7 @@ class MethodMissing:
 		return partial(self.method_missing, name)
 
 
-class Wrapper(object, MethodMissing):
+class Wrapper(MethodMissing, object):
 	def __init__(self, item):
 		self.item = item
 
@@ -38,7 +41,8 @@ class PandaRPC(object):
 		self.auth = auth
 
 	def http_post_request(self, name, args):
-		data = {"jsonrpc": "1.0", "id": "pandatip", "method": name, "params": args}
+		data = {"jsonrpc": "1.0", "id": "wojaktip", "method": name, "params": args}
+		_rpc_log.debug("RPC %s %s", name, args)
 		try:
 			req = requests.post(
 				url=self.uri,
@@ -47,9 +51,12 @@ class PandaRPC(object):
 				headers={"content-type": "text/plain", "connection": "close"}
 			)
 			if req.status_code != 200:
+				_rpc_log.debug("RPC %s -> HTTP %s", name, req.status_code)
 				return {"success": False, "message": req.status_code}
 			else:
-				return {"success": True, "result": req.json()}
+				res = req.json()
+				_rpc_log.debug("RPC %s -> success=%s error=%s", name, res.get("error") is None, res.get("error"))
+				return {"success": True, "result": res}
 		except requests.exceptions.ConnectionError:
 			return {"success": False, "message": "ConnectionError exception."}
 		except:

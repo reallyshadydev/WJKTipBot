@@ -1,4 +1,4 @@
-## PandaTip - Pandacoin tipbot for Telegram
+## WojakTip - WojakCoin ($WJK) tipbot for Telegram
  
 ### Dependencies 
 
@@ -9,59 +9,49 @@
 * `pip install emoji`
 
 
-In order to run the tip-bot a Pandacoin-Core client is needed (pandacoind). 
+In order to run the tip-bot a WojakCoin daemon is needed (wojakcoind). Use your **existing** `wojakcoin.conf` (e.g. in `~/.wojakcoin/wojakcoin.conf` or `/root/.wojakcoin/wojakcoin.conf`). No extra .conf or .service files are required.
 
 ### Configuration file
 
-Create a `config.json` **JSON** file and set up the following parameters:
+Create a `config.json` **JSON** file and set:
+
+* `rpc-uri`: `http://127.0.0.1:20760` (WojakCoin default RPC port)
+* `rpc-user`, `rpc-psw`: Same as in your existing **wojakcoin.conf** (`rpcuser` / `rpcpassword`)
 
 (sample)
  
     {
-    	"telegram-token": "such:sicret-token",
-    	"telegram-botname": "PandaTip",
-    	"rpc-uri": "http://127.0.0.1:22444",
-    	"rpc-user": "panda",
-    	"rpc-psw": "suchpassword",
+    	"telegram-token": "YOUR_BOT_TOKEN",
+    	"telegram-botname": "WojakTip",
+    	"rpc-uri": "http://127.0.0.1:20760",
+    	"rpc-user": "wojakcoinrpc",
+    	"rpc-psw": "YOUR_RPC_PASSWORD_FROM_wojakcoin.conf",
     	"admins": [-0, 0],
     	"spam_filter": [5, 60]
     }
 
-* `telegram-token`: Your bot's unique and secret token.
-  > Create a new bot by talking with [@BotFather](https://t.me/BotFather) to get one. 
-* `rpc-uri`: Address and port for the daemon.
-  > We do not advice to expose the port to external network. Please, be cautious.
-  > See [next section](#Pandacoin-daemon-configuration) to allow access for network addresses.
-* `rpc-user`, `rpc-psw`: Username and password for the daemon.
-  > You can set them in the `pandacoin.conf` file ([see next section](#Pandacoin-daemon-configuration)).
-* `admins`: An array of administrators' Telegram UserID (as integers).
-  > You can send `/user_id` to [@ContremaitreBot](https://t.me/ContremaitreBot) to know your UserID.
-* `spam_filter`: An array of two integers. The first value is the number of actions a user can perform in a period of time, the 2nd value defines that period of time in seconds.
-  > `"spam_filter": [5, 60]` means that users cannot perform more than 5 actions per minute.
+* `telegram-token`: Your bot's token from [@BotFather](https://t.me/BotFather).
+* `rpc-uri`: WojakCoin daemon RPC (default port **20760**). Keep it local (127.0.0.1).
+* `rpc-user`, `rpc-psw`: From your existing **wojakcoin.conf**.
+* `admins`: Telegram UserIDs of bot admins.
+* `spam_filter`: `[5, 60]` = max 5 actions per 60 seconds.
 
+### Daemon config
 
-### Pandacoin daemon configuration
+Use your **existing** wojakcoin.conf. Ensure it has at least:
 
-A `pandacoin.conf` file is needed in data directory.
+* `server=1`
+* `rpcuser=...` and `rpcpassword=...` (use those values in config.json)
+* `rpcport=20760` (or match the port in config.json `rpc-uri`)
+* `rpcallowip=127.0.0.1` (or as needed)
 
-(sample)
-
-    server=1
-    daemon=1
-    staking=0
-    rpcuser=muchuser
-    rpcpassword=suchsicret
-    pid=pandacoind.pid
-    rpcallowip=127.0.0.1
-    rpcconnect=127.0.0.1
+No .service or extra config files are used; run wojakcoind yourself, then start the bot.
 
 ---
 
 ### ToDo
 
-- [x] Add service commands like `/pause` (pauses the bot for everyone), and maybe some commands to check the health of the daemon / wallet.
+- [x] Add service commands like `/pause`
 - [x] Populate `strings.json`
 - [x] Add spam protection
 - [ ] Per-user language
-- [ ] ~~Show fiat equivalent for balance~~
-- [ ] ~~Add `/price` and `/marketcap` commands~~
