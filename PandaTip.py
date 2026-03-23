@@ -949,7 +949,7 @@ def rain(update, context):
 				disable_web_page_preview=True
 			)
 			return
-		# Rain = total amount split equally among recipients (each gets at least 1)
+		# Rain = total split across recipients in whole WJK (each gets at least 1 when checks above pass)
 		if _rain_amount_demanded < __rain_min_amount * n_recipients:
 			update.message.reply_text(
 				strings.get("rain_queue_min_amount", _lang) % (__rain_min_amount, "WJK", _rain_amount_demanded, "WJK"),
