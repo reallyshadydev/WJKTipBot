@@ -859,10 +859,10 @@ def damp_rock(update, context):
 
 def rain(update, context):
 	"""
-	/rain <amount> [times]
-	Each of up to `times` recently active members (excl. sender) receives `amount` WJK — like
-	raining that amount once per recipient for `times` people. Omit `times` to hit everyone
-	eligible (capped at the configured queue limit). Total = amount * (actual recipients).
+	/rain <total> [times]
+	Split `total` WJK in whole coins among up to `times` recently active members (excl. sender).
+	Integer split: sum of tips equals `total` (first recipients get +1 WJK when remainder).
+	Omit `times` to include everyone eligible (capped at the configured queue limit).
 	"""
 	args = context.args or []
 	_debug_log.debug("rain user=%s group=%s args=%s", update.effective_user.id, getattr(update.effective_chat, "id", None), args)
@@ -880,8 +880,8 @@ def rain(update, context):
 	_user_id = str(update.effective_user.id)
 	if len(args) == 0 or len(args) > 2:
 		update.message.reply_text(
-			"Use `/rain <amount> [times]` — rain `amount` WJK to each of up to `times` *active* members (you are excluded). "
-			"Omit `times` to rain on everyone eligible (up to %i)." % __rain_queue_max_members,
+			"Use `/rain <total> [times]` — split `total` WJK among up to `times` *active* members (you are excluded). "
+			"Omit `times` to split among everyone eligible (up to %i)." % __rain_queue_max_members,
 			quote=True,
 			parse_mode=ParseMode.MARKDOWN
 		)
@@ -896,11 +896,11 @@ def rain(update, context):
 				disable_web_page_preview=True
 			)
 			return
-		# Prepare arguments: amount per recipient, times = how many actives receive it (cap)
-		_rain_amount = 0
+		# total WJK to split; times = max number of active recipients in the split
+		_rain_total = 0
 		_times = __rain_queue_max_members  # max recipients when [times] omitted
 		try:
-			_rain_amount = int(args[0])
+			_rain_total = int(args[0])
 			if len(args) > 1:
 				_times = int(args[1])
 		except ValueError:
@@ -951,18 +951,31 @@ def rain(update, context):
 				disable_web_page_preview=True
 			)
 			return
-		if _rain_amount < __rain_min_amount:
+		if _rain_total < n_recipients:
 			update.message.reply_text(
-				strings.get("rain_queue_min_amount", _lang) % (__rain_min_amount, "WJK", _rain_amount, "WJK"),
+				strings.get("rain_queue_min_total", _lang) % (_rain_total, n_recipients),
 				quote=True,
 				parse_mode=ParseMode.MARKDOWN,
 				disable_web_page_preview=True
 			)
 			return
-		_total_out = _rain_amount * n_recipients
-		_debug_log.debug("rain amount=%s times=%s n_recipients=%s total=%s recipients=%s", _rain_amount, _times, n_recipients, _total_out, _recipients)
-		log("rain", _user_id, "rain amount %i WJK x %i recipients (total %i) handed to do_tip()" % (_rain_amount, n_recipients, _total_out))
-		do_tip(update, context, [_rain_amount], _recipients, _handled, verb="rain")
+		if _rain_total < __rain_min_amount * n_recipients:
+			_min_need = __rain_min_amount * n_recipients
+			update.message.reply_text(
+				strings.get("rain_queue_min_amount", _lang) % (
+					_rain_total, "WJK", n_recipients, __rain_min_amount, "WJK", _min_need, "WJK"
+				),
+				quote=True,
+				parse_mode=ParseMode.MARKDOWN,
+				disable_web_page_preview=True
+			)
+			return
+		_base = _rain_total // n_recipients
+		_rem = _rain_total % n_recipients
+		_rain_amounts = [_base + (1 if _i < _rem else 0) for _i in range(n_recipients)]
+		_debug_log.debug("rain total=%s times_cap=%s n_recipients=%s amounts=%s sum=%s recipients=%s", _rain_total, _times, n_recipients, _rain_amounts, sum(_rain_amounts), _recipients)
+		log("rain", _user_id, "rain split total %i across %i members amounts=%s handed to do_tip()" % (_rain_total, n_recipients, _rain_amounts))
+		do_tip(update, context, _rain_amounts, _recipients, _handled, verb="rain")
 
 
 def do_tip(update, context, amounts_float, recipients, handled, verb="tip"):
@@ -982,7 +995,8 @@ def do_tip(update, context, amounts_float, recipients, handled, verb="tip"):
 	if verb not in ["tip", "rain"]:
 		log("do_tip", "__system__", "Incorrect verb passed to do_tip()")
 		verb = "tip"
-	# Check if only 1 amount is given
+	# One amount + several recipients => same tip to each (/tip). Rain passes one amount per
+	# recipient (exact split); each raw tx below uses that row's value in send_dict.
 	_amounts_float = amounts_float
 	if len(_amounts_float) == 1 and len(recipients) > 1:
 		_amounts_float = _amounts_float * len(recipients)
