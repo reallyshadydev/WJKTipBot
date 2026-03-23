@@ -29,7 +29,7 @@
 			"`/tip` — Tip tagged users; use mentions and amounts (same amount for everyone or one amount per user).",
 			"",
 			":cloud_with_rain: *Rain (groups / supergroups only)*",
-			"`/rain <wjk_each> [how_many]` — Each of up to `how_many` *recently active* members gets `wjk_each` WJK (you are excluded). Total cost = `wjk_each` × (actual recipients). Omit `how_many` to include everyone eligible (up to 30).",
+			"`/rain <amount> [times]` — Rain `amount` WJK per person for up to `times` *recently active* members (you are excluded), like that amount `times` over the active list. Total = `amount` × (actual recipients). Omit `times` to include everyone eligible (up to 30).",
 			"`/checkactive` — Show how many users are in the rain activity queue.",
 			"",
 			":wrench: *Admin (configured bot admins only)*",
@@ -232,7 +232,7 @@
 
 	"rain_queue_min_max_members": {
 		"en": [
-			"`how_many` must be between `%i` and `%i` (you sent `%i`)."
+			"`times` must be between `%i` and `%i` (you sent `%i`)."
 		]
 	},
 

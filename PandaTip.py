@@ -859,10 +859,10 @@ def damp_rock(update, context):
 
 def rain(update, context):
 	"""
-	/rain <wjk_each> [how_many_people]
-	Each of up to how_many_people recently active members (excl. sender) receives wjk_each WJK.
-	Omit how_many_people to include everyone eligible (capped at the configured queue limit).
-	Total spent = wjk_each * (actual recipient count).
+	/rain <amount> [times]
+	Each of up to `times` recently active members (excl. sender) receives `amount` WJK — like
+	raining that amount once per recipient for `times` people. Omit `times` to hit everyone
+	eligible (capped at the configured queue limit). Total = amount * (actual recipients).
 	"""
 	args = context.args or []
 	_debug_log.debug("rain user=%s group=%s args=%s", update.effective_user.id, getattr(update.effective_chat, "id", None), args)
@@ -880,8 +880,8 @@ def rain(update, context):
 	_user_id = str(update.effective_user.id)
 	if len(args) == 0 or len(args) > 2:
 		update.message.reply_text(
-			"Use `/rain <wjk_each> [how_many]` — each of up to `how_many` *active* members gets `wjk_each` WJK (you are excluded). "
-			"Omit `how_many` to rain on everyone eligible (up to %i)." % __rain_queue_max_members,
+			"Use `/rain <amount> [times]` — rain `amount` WJK to each of up to `times` *active* members (you are excluded). "
+			"Omit `times` to rain on everyone eligible (up to %i)." % __rain_queue_max_members,
 			quote=True,
 			parse_mode=ParseMode.MARKDOWN
 		)
@@ -896,18 +896,18 @@ def rain(update, context):
 				disable_web_page_preview=True
 			)
 			return
-		# Prepare arguments
-		_amount_each = 0
-		_rain_members_demanded = __rain_queue_max_members  # cap on recipients when how_many omitted
+		# Prepare arguments: amount per recipient, times = how many actives receive it (cap)
+		_rain_amount = 0
+		_times = __rain_queue_max_members  # max recipients when [times] omitted
 		try:
-			_amount_each = int(args[0])
+			_rain_amount = int(args[0])
 			if len(args) > 1:
-				_rain_members_demanded = int(args[1])
+				_times = int(args[1])
 		except ValueError:
 			return  # Don't show error. Probably trolling.
-		if len(args) > 1 and (_rain_members_demanded < __rain_min_members or _rain_members_demanded > __rain_queue_max_members):
+		if len(args) > 1 and (_times < __rain_min_members or _times > __rain_queue_max_members):
 			update.message.reply_text(
-				strings.get("rain_queue_min_max_members", _lang) % (__rain_min_members, __rain_queue_max_members, _rain_members_demanded),
+				strings.get("rain_queue_min_max_members", _lang) % (__rain_min_members, __rain_queue_max_members, _times),
 				quote=True,
 				parse_mode=ParseMode.MARKDOWN,
 				disable_web_page_preview=True
@@ -933,14 +933,14 @@ def rain(update, context):
 				disable_web_page_preview=True
 			)
 			return
-		# Build recipients list (up to _rain_members_demanded, excluding sender)
+		# Build recipients list (up to _times active members, excluding sender)
 		_recipients = []  # Array of LocalUserID
 		_handled = {}  # Dict of LocalUserID: (Readable Name, Unused, Unused)
 		for _user_data in _rain_queues[_group_id]:
 			if _user_data[0] != _user_id:
 				_recipients.append(_user_data[1])
 				_handled[_user_data[1]] = (_user_data[2], None, None)
-				if len(_recipients) >= _rain_members_demanded:
+				if len(_recipients) >= _times:
 					break
 		n_recipients = len(_recipients)
 		if n_recipients == 0:
@@ -951,18 +951,18 @@ def rain(update, context):
 				disable_web_page_preview=True
 			)
 			return
-		if _amount_each < __rain_min_amount:
+		if _rain_amount < __rain_min_amount:
 			update.message.reply_text(
-				strings.get("rain_queue_min_amount", _lang) % (__rain_min_amount, "WJK", _amount_each, "WJK"),
+				strings.get("rain_queue_min_amount", _lang) % (__rain_min_amount, "WJK", _rain_amount, "WJK"),
 				quote=True,
 				parse_mode=ParseMode.MARKDOWN,
 				disable_web_page_preview=True
 			)
 			return
-		_total_out = _amount_each * n_recipients
-		_debug_log.debug("rain each=%s n_recipients=%s total=%s recipients=%s", _amount_each, n_recipients, _total_out, _recipients)
-		log("rain", _user_id, "rain %i WJK each x %i active members (total %i) handed to do_tip()" % (_amount_each, n_recipients, _total_out))
-		do_tip(update, context, [_amount_each], _recipients, _handled, verb="rain")
+		_total_out = _rain_amount * n_recipients
+		_debug_log.debug("rain amount=%s times=%s n_recipients=%s total=%s recipients=%s", _rain_amount, _times, n_recipients, _total_out, _recipients)
+		log("rain", _user_id, "rain amount %i WJK x %i recipients (total %i) handed to do_tip()" % (_rain_amount, n_recipients, _total_out))
+		do_tip(update, context, [_rain_amount], _recipients, _handled, verb="rain")
 
 
 def do_tip(update, context, amounts_float, recipients, handled, verb="tip"):
