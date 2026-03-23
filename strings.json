@@ -29,7 +29,7 @@
 			"`/tip` — Tip tagged users; use mentions and amounts (same amount for everyone or one amount per user).",
 			"",
 			":cloud_with_rain: *Rain (groups / supergroups only)*",
-			"`/rain <total> [times]` — Split `total` WJK *exactly* among up to `times` *recently active* members (you are excluded). Example: `50` over `50` people → 1 WJK each (remainder spread when it does not divide evenly). Omit `times` to use everyone eligible (up to 30).",
+			"`/rain <total> [times]` — Split `total` WJK *exactly* among up to `times` *recently active* members (you are excluded). All recipients are paid in *one* on-chain transaction per `/rain`. Example: `50` over `50` people → 1 WJK each. Omit `times` to use everyone eligible (up to 30).",
 			"`/checkactive` — Show how many users are in the rain activity queue.",
 			"",
 			":wrench: *Admin (configured bot admins only)*",

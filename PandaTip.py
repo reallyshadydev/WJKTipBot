@@ -1032,10 +1032,14 @@ def do_tip(update, context, amounts_float, recipients, handled, verb="tip"):
 		else:
 			_balance = int(_rpc_call["result"]["result"])
 			_debug_log.debug("do_tip balance=%s sum(amounts)=%s recipients_count=%s", _balance, sum(_amounts_float), len(recipients))
-			# Now, finally, check if user has enough funds (includes tx fee)
-			if sum(_amounts_float) > _balance - max(1, int(len(recipients)/3)):
+			# Fee cushion: one tx for rain; legacy per-recipient txs for tip
+			if verb == "rain":
+				_fee_buf = 1
+			else:
+				_fee_buf = max(1, int(len(recipients) / 3))
+			if sum(_amounts_float) > _balance - _fee_buf:
 				update.message.reply_text(
-					text="%s `%i WJK`" % (strings.get("tip_no_funds", _lang), sum(_amounts_float) + max(1, int(len(recipients)/3))),
+					text="%s `%i WJK`" % (strings.get("tip_no_funds", _lang), sum(_amounts_float) + _fee_buf),
 					quote=True,
 					parse_mode=ParseMode.MARKDOWN
 				)
@@ -1091,97 +1095,138 @@ def do_tip(update, context, amounts_float, recipients, handled, verb="tip"):
 						# WojakCoin sendmany expects addresses as keys
 						send_dict[_address] = _amounts_float[i]
 					i += 1
-				# After building send_dict: one tx per recipient (do not send inside the loop above)
+				# After building send_dict: rain = one multi-output tx; tip = one tx per recipient
 				_debug_log.debug("do_tip send_dict=%s _tip_dict=%s", send_dict, _tip_dict)
 				if len(_tip_dict) == 0:
 					return
 				fee = 0.0001  # fixed fee, matches wallet paytxfee
 				txids = []
-				for _address, _amount in send_dict.items():
-					# 1) Select UTXOs from the sender's address (minconf=0, spend unconfirmed)
+
+				def _broadcast_raw_tx(inputs, outputs, log_ctx):
+					_rpc_call = __wallet_rpc.createrawtransaction(inputs, outputs)
+					if not _rpc_call["success"]:
+						print("Error during RPC call.")
+						log("do_tip", _user_id, "%s createrawtransaction > Error during RPC call: %s" % (log_ctx, _rpc_call["message"]))
+						return None
+					if _rpc_call["result"]["error"] is not None:
+						print("Error: %s" % _rpc_call["result"]["error"])
+						log("do_tip", _user_id, "%s createrawtransaction > Error: %s" % (log_ctx, _rpc_call["result"]["error"]))
+						return None
+					rawtx = _rpc_call["result"]["result"]
+					_rpc_call = __wallet_rpc.signrawtransaction(rawtx)
+					if not _rpc_call["success"]:
+						print("Error during RPC call.")
+						log("do_tip", _user_id, "%s signrawtransaction > Error during RPC call: %s" % (log_ctx, _rpc_call["message"]))
+						return None
+					if _rpc_call["result"]["error"] is not None:
+						print("Error: %s" % _rpc_call["result"]["error"])
+						log("do_tip", _user_id, "%s signrawtransaction > Error: %s" % (log_ctx, _rpc_call["result"]["error"]))
+						return None
+					_sign_res = _rpc_call["result"]["result"]
+					if not _sign_res.get("complete", False):
+						log("do_tip", _user_id, "%s signrawtransaction > Incomplete signature" % log_ctx)
+						return None
+					signed_hex = _sign_res["hex"]
+					_rpc_call = __wallet_rpc.sendrawtransaction(signed_hex)
+					if not _rpc_call["success"]:
+						print("Error during RPC call.")
+						log("do_tip", _user_id, "%s sendrawtransaction > Error during RPC call: %s" % (log_ctx, _rpc_call["message"]))
+						return None
+					if _rpc_call["result"]["error"] is not None:
+						print("Error: %s" % _rpc_call["result"]["error"])
+						log("do_tip", _user_id, "%s sendrawtransaction > Error: %s" % (log_ctx, _rpc_call["result"]["error"]))
+						return None
+					return _rpc_call["result"]["result"]
+
+				if verb == "rain":
+					# One transaction with all recipient outputs (plus change)
+					_outputs_agg = {}
+					for _addr, _amt in send_dict.items():
+						_outputs_agg[_addr] = _outputs_agg.get(_addr, 0.0) + float(_amt)
+					total_out = sum(_outputs_agg.values())
+					needed = total_out + fee
 					_rpc_call = __wallet_rpc.listunspent(0, 9999999, [_from_address])
 					if not _rpc_call["success"]:
 						print("Error during RPC call.")
-						log("do_tip", _user_id, "(4) listunspent(%s) > Error during RPC call: %s" % (_from_address, _rpc_call["message"]))
+						log("do_tip", _user_id, "(rain) listunspent(%s) > Error during RPC call: %s" % (_from_address, _rpc_call["message"]))
 						return
-					elif _rpc_call["result"]["error"] is not None:
+					if _rpc_call["result"]["error"] is not None:
 						print("Error: %s" % _rpc_call["result"]["error"])
-						log("do_tip", _user_id, "(4) listunspent(%s) > Error: %s" % (_from_address, _rpc_call["result"]["error"]))
+						log("do_tip", _user_id, "(rain) listunspent(%s) > Error: %s" % (_from_address, _rpc_call["result"]["error"]))
 						return
-
 					_utxos = _rpc_call["result"]["result"]
 					inputs = []
 					total_in = 0.0
 					for utxo in _utxos:
-						inputs.append({
-							"txid": utxo["txid"],
-							"vout": utxo["vout"],
-						})
+						inputs.append({"txid": utxo["txid"], "vout": utxo["vout"]})
 						total_in += float(utxo["amount"])
-						if total_in >= _amount + fee:
+						if total_in >= needed:
 							break
-
-					if total_in < _amount + fee:
+					if total_in < needed:
 						update.message.reply_text(
-							text="%s `%i WJK`" % (strings.get("tip_no_funds", _lang), _amount),
+							text="%s `%i WJK`" % (strings.get("tip_no_funds", _lang), int(total_out) + 1),
 							quote=True,
 							parse_mode=ParseMode.MARKDOWN
 						)
-						log("do_tip", _user_id, "(4) listunspent > Not enough UTXOs for raw tip")
+						log("do_tip", _user_id, "(rain) listunspent > Not enough UTXOs for batched rain")
 						return
-
-					change = total_in - _amount - fee
-					outputs = {
-						_address: float(_amount)
-					}
-					# Only create a change output if change is positive and non-dust
+					change = total_in - total_out - fee
+					outputs = dict(_outputs_agg)
 					if change > 0:
-						outputs[_from_address] = round(change, 8)
-
-					# 2) Create raw transaction
-					_rpc_call = __wallet_rpc.createrawtransaction(inputs, outputs)
-					if not _rpc_call["success"]:
-						print("Error during RPC call.")
-						log("do_tip", _user_id, "(4) createrawtransaction > Error during RPC call: %s" % _rpc_call["message"])
+						if _from_address in outputs:
+							outputs[_from_address] = round(outputs[_from_address] + change, 8)
+						else:
+							outputs[_from_address] = round(change, 8)
+					_txid = _broadcast_raw_tx(inputs, outputs, "(rain batch)")
+					if _txid is None:
 						return
-					elif _rpc_call["result"]["error"] is not None:
-						print("Error: %s" % _rpc_call["result"]["error"])
-						log("do_tip", _user_id, "(4) createrawtransaction > Error: %s" % _rpc_call["result"]["error"])
-						return
+					txids.append(_txid)
+					_debug_log.debug("do_tip rain batch tx %s outputs=%s total_out=%s", _txid[:12], len(outputs), total_out)
+				else:
+					for _address, _amount in send_dict.items():
+						_rpc_call = __wallet_rpc.listunspent(0, 9999999, [_from_address])
+						if not _rpc_call["success"]:
+							print("Error during RPC call.")
+							log("do_tip", _user_id, "(4) listunspent(%s) > Error during RPC call: %s" % (_from_address, _rpc_call["message"]))
+							return
+						elif _rpc_call["result"]["error"] is not None:
+							print("Error: %s" % _rpc_call["result"]["error"])
+							log("do_tip", _user_id, "(4) listunspent(%s) > Error: %s" % (_from_address, _rpc_call["result"]["error"]))
+							return
 
-					rawtx = _rpc_call["result"]["result"]
+						_utxos = _rpc_call["result"]["result"]
+						inputs = []
+						total_in = 0.0
+						for utxo in _utxos:
+							inputs.append({
+								"txid": utxo["txid"],
+								"vout": utxo["vout"],
+							})
+							total_in += float(utxo["amount"])
+							if total_in >= _amount + fee:
+								break
 
-					# 3) Sign raw transaction
-					_rpc_call = __wallet_rpc.signrawtransaction(rawtx)
-					if not _rpc_call["success"]:
-						print("Error during RPC call.")
-						log("do_tip", _user_id, "(4) signrawtransaction > Error during RPC call: %s" % _rpc_call["message"])
-						return
-					elif _rpc_call["result"]["error"] is not None:
-						print("Error: %s" % _rpc_call["result"]["error"])
-						log("do_tip", _user_id, "(4) signrawtransaction > Error: %s" % _rpc_call["result"]["error"])
-						return
+						if total_in < _amount + fee:
+							update.message.reply_text(
+								text="%s `%i WJK`" % (strings.get("tip_no_funds", _lang), _amount),
+								quote=True,
+								parse_mode=ParseMode.MARKDOWN
+							)
+							log("do_tip", _user_id, "(4) listunspent > Not enough UTXOs for raw tip")
+							return
 
-					_sign_res = _rpc_call["result"]["result"]
-					if not _sign_res.get("complete", False):
-						log("do_tip", _user_id, "(4) signrawtransaction > Incomplete signature")
-						return
+						change = total_in - _amount - fee
+						outputs = {
+							_address: float(_amount)
+						}
+						if change > 0:
+							outputs[_from_address] = round(change, 8)
 
-					signed_hex = _sign_res["hex"]
-
-					# 4) Broadcast raw transaction
-					_rpc_call = __wallet_rpc.sendrawtransaction(signed_hex)
-					if not _rpc_call["success"]:
-						print("Error during RPC call.")
-						log("do_tip", _user_id, "(4) sendrawtransaction > Error during RPC call: %s" % _rpc_call["message"])
-						return
-					elif _rpc_call["result"]["error"] is not None:
-						print("Error: %s" % _rpc_call["result"]["error"])
-						log("do_tip", _user_id, "(4) sendrawtransaction > Error: %s" % _rpc_call["result"]["error"])
-						return
-
-					txids.append(_rpc_call["result"]["result"])
-					_debug_log.debug("do_tip sent tx %s -> %s amount=%s", _rpc_call["result"]["result"][:12], _address[:12], _amount)
+						_txid = _broadcast_raw_tx(inputs, outputs, "(tip)")
+						if _txid is None:
+							return
+						txids.append(_txid)
+						_debug_log.debug("do_tip sent tx %s -> %s amount=%s", _txid[:12], _address[:12], _amount)
 
 				_suppl = ""
 				if len(_tip_dict) != len(recipients):
